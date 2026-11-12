@@ -1,0 +1,177 @@
+name: GDPeso production CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gdpeso-production-i-068efaae507c5294d
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Build static site
+        run: npm run build
+      - name: Package immutable release
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        run: python3 deployment/package.py build --root . --output "$RUNNER_TEMP/gdpeso.tar.gz" > "$RUNNER_TEMP/package.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        with:
+          name: gdpeso-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gdpeso.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    needs: build
+    if: needs.build.result == 'success' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: gdpeso-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release
+      - name: Verify release artifact
+        id: artifact
+        env:
+          ARCHIVE: ${{ runner.temp }}/release/gdpeso.tar.gz
+          REPOSITORY: ${{ github.repository }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+          REVISION: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python3 deployment/package.py verify \
+            --archive "$ARCHIVE" \
+            --repository "$REPOSITORY" \
+            --repository-id "$REPOSITORY_ID" \
+            --revision "$REVISION" \
+            --run-id "$RUN_ID" \
+            --run-attempt "$RUN_ATTEMPT" > "$RUNNER_TEMP/verified.json"
+          sha256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "$RUNNER_TEMP/verified.json")"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+      - name: Confirm revision is still the main branch head
+        id: branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! head_sha="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            https://api.github.com/repos/FrancisIGP/BI-Capstone/branches/main | jq -er '.commit.sha')"; then
+            echo 'Could not verify the main branch head; deployment is stopped.' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          if [[ "$head_sha" != "$REVISION" ]]; then
+            echo 'current=false' >> "$GITHUB_OUTPUT"
+            echo 'Skipped deployment because this revision is no longer the main branch head.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo 'current=true' >> "$GITHUB_OUTPUT"
+      - name: Configure production AWS role
+        if: steps.branch.outputs.current == 'true'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::173677044880:role/gdpeso-github-production
+          aws-region: us-east-1
+          allowed-account-ids: '173677044880'
+          role-session-name: gdpeso-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Upload immutable release artifact
+        id: upload
+        if: steps.branch.outputs.current == 'true'
+        env:
+          ARCHIVE_SHA: ${{ steps.artifact.outputs.sha256 }}
+          REVISION: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          key="gdpeso/releases/${REVISION}/${RUN_ID}-${RUN_ATTEMPT}.tar.gz"
+          aws s3api put-object \
+            --bucket msi-gdpeso-releases-173677044880-us-east-1 \
+            --key "$key" \
+            --body "$RUNNER_TEMP/release/gdpeso.tar.gz" \
+            --content-type application/gzip \
+            --if-none-match '*' \
+            --metadata "sha256=${ARCHIVE_SHA},revision=${REVISION},run-id=${RUN_ID},run-attempt=${RUN_ATTEMPT}" >/dev/null
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+      - name: Deploy through Systems Manager
+        if: steps.branch.outputs.current == 'true'
+        env:
+          ARTIFACT_KEY: ${{ steps.upload.outputs.key }}
+          ARCHIVE_SHA: ${{ steps.artifact.outputs.sha256 }}
+          REVISION: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          report() { printf '%s\n' "$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          params="$(jq -cn --arg key "$ARTIFACT_KEY" --arg sha "$ARCHIVE_SHA" --arg rev "$REVISION" --arg run "$RUN_ID" --arg attempt "$RUN_ATTEMPT" '{ArtifactKey:[$key],Sha256:[$sha],Revision:[$rev],RunId:[$run],RunAttempt:[$attempt]}')"
+          if ! command_id="$(aws ssm send-command \
+            --instance-ids i-068efaae507c5294d \
+            --document-name GDPeso-DeployProduction \
+            --parameters "$params" \
+            --timeout-seconds 900 \
+            --query 'Command.CommandId' --output text 2>/dev/null)" || [[ ! "$command_id" =~ ^[a-f0-9-]{36}$ ]]; then
+            report 'Could not confirm SSM command submission. Check Run Command before retrying.'
+            exit 1
+          fi
+          report "Started deployment command ${command_id}."
+          deadline=$((SECONDS + 1200))
+          while (( SECONDS < deadline )); do
+            if result="$(aws ssm get-command-invocation --command-id "$command_id" --instance-id i-068efaae507c5294d --output json 2>&1)"; then
+              status="$(jq -er '.Status | strings' <<<"$result")"
+              case "$status" in
+                Pending|InProgress|Delayed|Cancelling) ;;
+                Success|Failed|Cancelled|TimedOut)
+                  code="$(jq -er '.ResponseCode | numbers' <<<"$result")"
+                  report "SSM command ${command_id} finished with ${status} (exit ${code})."
+                  outcome="$(jq -r '.StandardOutputContent // ""' <<<"$result")"
+                  if [[ "$outcome" != *$'\n'* && "$outcome" != *$'\r'* && "$outcome" =~ ^GDPeso\ deployment\ (verified:\ [0-9a-f]{40}|skipped:\ stale\ revision|failed:\ (download|validation|activation|verification|preflight))$ ]]; then
+                    report "$outcome"
+                  fi
+                  [[ "$status" == Success && "$code" == 0 ]]
+                  exit $?
+                  ;;
+                *) report "SSM command ${command_id} returned an unexpected status. Check Run Command."; exit 1 ;;
+              esac
+            elif [[ "$result" != *'(InvocationDoesNotExist)'* && "$result" != *'(ThrottlingException)'* ]]; then
+              report "Could not query SSM command ${command_id}. Check Run Command before retrying."
+              exit 1
+            fi
+            sleep 10
+          done
+          report "Polling timed out for SSM command ${command_id}. Check Run Command before retrying."
+          exit 1
