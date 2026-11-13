@@ -1,0 +1,22 @@
+[Unit]
+Description=GDPeso read-only MySQL economic indicators API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+DynamicUser=yes
+LoadCredential=mysql.cnf:/etc/gdpeso-data/mysql.cnf
+ExecStart=/usr/bin/python3 -I /usr/local/lib/gdpeso-data/api.py
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+TasksMax=16
+MemoryMax=96M
+
+[Install]
+WantedBy=multi-user.target

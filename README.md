@@ -33,16 +33,11 @@ Deploy the contents of `dist/` to any static host. Build command: `npm run build
 - Purchasing Power
 - About & Sources
 
-## Data status — important
+## Production data
 
-**All numeric chart series in this prototype are synthetic placeholders for UI demonstration.** They are not actual Philippine GDP, PSA, or World Bank measurements and must not be used to draw empirical conclusions. KPI cards explicitly say "Pending". Replace the example arrays in `src/App.jsx` with a validated data API before publication of results.
+The deployed dashboard reads the shared GDPeso MySQL warehouse through its same-origin API. The national charts use Philippine World Bank World Development Indicators from 2015–2025. The import includes GDP, annual growth, GDP per capita, CPI inflation, sector shares, household consumption, and capital formation. The Regional GRDP section is pending a validated Philippine Statistics Authority dataset.
 
-The original group SQL schema is included in `database/schema.sql` for reference. It defines PostgreSQL schema `dw` with 18 dimension tables and 8 fact tables. It does not include populated data or a database server. Do not expose database passwords or connect to PostgreSQL directly from the browser; use a backend API.
-
-## Project data sources (planned)
-
-- Philippine Statistics Authority — Philippine System of National Accounts, GRDP, household expenditure, inflation indicators
-- World Bank — GDP and GDP per-capita indicators
+See [deployment notes](DEPLOYMENT.md) for the API and import. Production data comes from the warehouse, and published source updates require a separate import.
 
 ## Collaborator handoff
 

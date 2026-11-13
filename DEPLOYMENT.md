@@ -1,6 +1,6 @@
 # GDPeso deployment
 
-The dashboard at `https://www.gdpeso.xyz/` is a static preview. Its chart data is synthetic. The frontend does not connect to MySQL or contain database credentials.
+The dashboard at `https://www.gdpeso.xyz/` serves a static React build and reads economic indicators through the same-origin `/api/economy` endpoint. The API queries the existing GDPeso MySQL warehouse through verified TLS with a read-only account.
 
 | Item | Production setting |
 | --- | --- |
@@ -21,6 +21,12 @@ The GitHub deployment role can write only the GDPeso release prefix, invoke its 
 
 ## Database and recovery
 
-The MySQL bootstrap defines the original warehouse's 26 tables and 45 foreign keys. Connect explicitly to `2026_3dsa_4_GDPeso` before running it on a fresh database. The source PostgreSQL file is kept for reference. CI/CD does not run SQL or import data. Production data integration requires an API with a restricted database account.
+The MySQL bootstrap defines the original warehouse's 26 tables and 45 foreign keys. Connect explicitly to `2026_3dsa_4_GDPeso` before running it on a fresh database. The source PostgreSQL file is kept for reference. CI/CD does not run SQL or import data. The GDPeso API service uses a dedicated account with SELECT on the four warehouse tables its query joins.
 
 Inspect the exact GitHub run and SSM invocation on failure. The host runner keeps detailed errors in `/home/ubuntu/2026_3dsa_4_GDPeso/.deploy-errors.log`. Confirm the previous command has stopped before retrying. To roll back an application regression that passed deployment checks, revert the application change on `main` and verify the resulting run. The database is outside application rollback.
+
+## Published indicator data
+
+The initial import used 121 annual World Bank World Development Indicators observations for the Philippines covering 2015–2025 across 11 series. The source URLs and indicator metadata are recorded in the warehouse. The validated input is in deployment/data/wdi-ph-2015-2025.json. The operator-only importer, deployment/data/import_wdi.py, requires a private TLS MySQL option file and refuses to overwrite existing warehouse data.
+
+The EC2 operator installs deployment/data/api.py as /usr/local/lib/gdpeso-data/api.py and the matching systemd unit. Set up its dedicated client options at /etc/gdpeso-data/mysql.cnf, readable only by root, and load through systemd credentials. Install the exact /api/economy proxy from deployment/host/gdpeso-static.conf as part of the host rollout. The API binds to loopback and refreshes its cache from MySQL after 30 seconds. The annual data import is a snapshot with no scheduled upstream ingestion. PSA regional GRDP is pending a validated source.
